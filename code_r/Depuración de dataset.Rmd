@@ -1,0 +1,390 @@
+---
+title: "Smartwaches"
+author: "Isaac"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r cars}
+deidentified_data <- read.csv("deidentified_data.csv")
+
+```
+
+
+
+```{r}
+# 1. Cargar la librería
+library(dplyr)
+library(tidyr)
+
+# 2. Eliminar filas donde ECG es nulo (es nuestro gold standard)
+
+dataset_limpio <- deidentified_data %>%
+  drop_na(ECG)
+
+#filas antes vs filas después
+nrow(deidentified_data)
+nrow(dataset_limpio)
+```
+
+```{r}
+# ==========================================
+# 1. LOAD DATA & INITIAL AUDIT
+# ==========================================
+library(tidyverse)
+library(viridis)
+
+raw_data <- read.csv("deidentified_data.csv", na.strings = c("NA", "NaN", "", " "))
+
+# Standardizing sensor names (handling dots/spaces)
+actual_sensors <- c("ECG", "Apple.Watch", "Empatica", "Garmin", "Fitbit", "Miband", "Biovotion")
+actual_sensors <- actual_sensors[actual_sensors %in% names(raw_data)]
+
+# ==========================================
+# 2. DATA QUALITY AUDIT (PRE-FILTERING)
+# ==========================================
+# Calculate how "empty" each row is
+void_analysis <- raw_data %>%
+  mutate(empty_count = rowSums(is.na(select(., all_of(actual_sensors)))),
+         is_totally_void = empty_count == length(actual_sensors))
+
+# ==========================================
+# 3. GRAPH: VOID DISTRIBUTION (THE "SILENT" ROWS)
+# ==========================================
+p_voids <- void_analysis %>%
+  group_by(Activity) %>%
+  summarise(Total_Rows = n(), 
+            Void_Rows = sum(is_totally_void)) %>%
+  pivot_longer(cols = -Activity) %>%
+  ggplot(aes(x = Activity, y = value, fill = name)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black", alpha = 0.8) +
+  scale_fill_manual(values = c("Total_Rows" = "#34495e", "Void_Rows" = "#e74c3c"),
+                    labels = c("Total Recorded", "Totally Empty")) +
+  labs(title = "Data Presence Audit", subtitle = "Red bars show time segments with zero sensor activity",
+       x = "Activity Phase", y = "Number of Seconds (Rows)") +
+  theme_minimal()
+
+# ==========================================
+# 4. MATERIALISING MINABLE VIEW
+# ==========================================
+minable_view <- raw_data %>%
+  filter(!is.na(ECG)) %>%
+  filter(if_any(all_of(actual_sensors), ~ !is.na(.))) %>%
+  filter(ECG >= 30 & ECG <= 220)
+
+# ==========================================
+# 5. GRAPH: SENSOR DENSITY MAP (DEEP BLUE SCALE)
+# ==========================================
+# We calculate "Data Presence" (100 - Missing %)
+# We use a square root scale to amplify differences in sparse data
+p_density_map <- minable_view %>%
+  group_by(ID) %>%
+  summarise(across(all_of(actual_sensors), ~mean(!is.na(.)) * 100)) %>%
+  pivot_longer(-ID, names_to = "Sensor", values_to = "Presence") %>%
+  ggplot(aes(x = Sensor, y = as.factor(ID), fill = Presence)) +
+  geom_tile(color = "white", size = 0.1) +
+  # Deep Blue Scale: Light blue = almost empty, Dark Navy = Full data
+  scale_fill_distiller(palette = "Blues", direction = 1, name = "% Active") +
+  labs(title = "High-Resolution Data Density Map", 
+       subtitle = "Darker blue indicates more continuous signal per participant",
+       x = "Sensor / Device", y = "Participant ID") +
+  theme_minimal() + 
+  theme(axis.text.y = element_text(size = 5),
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# ==========================================
+# 6. GRAPH: BPM ANALYSIS (INCLUDING BIOVOTION)
+# ==========================================
+p_activity_bpm <- minable_view %>%
+  select(Activity, all_of(actual_sensors)) %>%
+  pivot_longer(-Activity, names_to = "Device", values_to = "BPM") %>%
+  filter(!is.na(BPM)) %>%
+  ggplot(aes(x = Device, y = BPM, fill = Device)) +
+  geom_boxplot(outlier.color = "#c0392b", outlier.alpha = 0.3, width = 0.6) +
+  facet_wrap(~Activity) +
+  scale_fill_brewer(palette = "Paired") +
+  labs(title = "Heart Rate Signal Distribution", 
+       subtitle = "Comparison of Biovotion and wrist-worn devices against reference",
+       x = "", y = "Beats Per Minute (BPM)") +
+  theme_bw() + 
+  theme(axis.text.x = element_text(angle = 45, hjust = 1), legend.position = "none")
+
+# ==========================================
+# 7. EXECUTION
+# ==========================================
+print(p_voids)
+print(p_density_map)
+print(p_activity_bpm)
+```
+
+```{r}
+# ==========================================
+# EXTRA: ORDERED ACTIVITY DATA COUNT
+# ==========================================
+library(tidyverse)
+
+# 1. Identify sensors
+target_sensors <- c("ECG", "Apple.Watch", "Empatica", "Garmin", "Fitbit", "Miband", "Biovotion")
+available_sensors <- names(raw_data)[names(raw_data) %in% target_sensors]
+
+# 2. Calculate non-null counts per Activity and Sensor
+activity_counts <- raw_data %>%
+  group_by(Activity) %>%
+  summarise(across(all_of(available_sensors), ~ sum(!is.na(.)))) %>%
+  pivot_longer(-Activity, names_to = "Sensor", values_to = "Valid_Records") %>%
+  # Filter out combinations with 0 data to keep it clean
+  filter(Valid_Records > 0)
+
+# 3. Plot: Ordered Bars by Data Volume
+p_activity_bars <- ggplot(activity_counts, 
+                          aes(x = reorder(Sensor, -Valid_Records), 
+                              y = Valid_Records, 
+                              fill = Activity)) +
+  geom_col(position = "dodge", color = "white", alpha = 0.9) +
+  # Professional Blue Palette
+  scale_fill_brewer(palette = "Blues") +
+  labs(title = "Data Volume by Sensor and Activity",
+       subtitle = "Sorted by total valid heart rate records (Non-Null values)",
+       x = "Recording Device", 
+       y = "Total Valid Seconds (BPM)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        panel.grid.major.x = element_blank())
+
+# 4. Display
+print(p_activity_bars)
+```
+```{r}
+# ==========================================
+# TOTAL RECOVERY: AUTO-DETECT ACTIVITIES
+# ==========================================
+library(tidyverse)
+
+# 1. Carga limpia y detección de columnas
+raw_data <- read.csv("deidentified_data.csv", na.strings = c("NA", "NaN", "", " "))
+
+# Limpiamos nombres de sensores (Biovotion incluido)
+sensors <- c("ECG", "Apple.Watch", "Empatica", "Garmin", "Fitbit", "Miband", "Biovotion")
+available <- names(raw_data)[names(raw_data) %in% sensors]
+
+# 2. Limpieza radical de la columna Activity
+# Esto elimina espacios, saltos de línea y basura de texto
+raw_data$Activity <- trimws(as.character(raw_data$Activity))
+
+# 3. Listar actividades reales (Esto nos dirá qué hay exactamente)
+lista_actividades <- unique(raw_data$Activity)
+lista_actividades <- lista_actividades[!is.na(lista_actividades)]
+
+# 4. CREAR Y MOSTRAR TODAS LAS TABLAS POSIBLES
+# Este bucle va a crear una tabla por cada actividad que exista en tu archivo
+for (act in lista_actividades) {
+  
+  cat("\n==========================================\n")
+  cat("TABLE FOR ACTIVITY:", act, "\n")
+  cat("==========================================\n")
+  
+  resumen <- raw_data %>%
+    filter(Activity == act) %>%
+    group_by(Skin.Tone) %>%
+    summarise(across(all_of(available), ~ round(mean(., na.rm = TRUE), 1)), .groups = "drop") %>%
+    # Aseguramos los 6 tonos de piel
+    complete(Skin.Tone = 1:6) %>%
+    # Si sale NaN, ponemos un guion "-"
+    mutate(across(-Skin.Tone, ~ ifelse(is.nan(.), "-", as.character(.))))
+  
+  print(resumen, row.names = FALSE)
+}
+```
+```{r}
+# ==========================================
+# PATTERN ANALYSIS: ACTIVITY SEQUENCE
+# ==========================================
+library(tidyverse)
+
+# 1. Detectar columna de tiempo automáticamente
+detect_time <- ifelse("Time" %in% names(raw_data), "Time", names(raw_data)[1])
+
+# 2. Analizar el orden cronológico de las actividades por paciente
+sequence_report <- raw_data %>%
+  group_by(ID, Activity) %>%
+  summarise(
+    Start_Second = min(get(detect_time), na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(ID, Start_Second) %>%
+  group_by(ID) %>%
+  summarise(
+    Full_Sequence = paste(Activity, collapse = " -> "),
+    Steps = n()
+  )
+
+# 3. Ver cuáles son los patrones más comunes
+patterns_summary <- sequence_report %>%
+  group_by(Full_Sequence) %>%
+  tally(sort = TRUE)
+
+# ==========================================
+# OUTPUT
+# ==========================================
+print("--- MOST COMMON ACTIVITY SEQUENCES ---")
+print(patterns_summary)
+
+# Ejemplo visual para el reporte:
+# Ver cómo saltan las actividades en el tiempo para el primer ID
+sample_id <- unique(raw_data$ID)[1]
+p_seq_viz <- raw_data %>%
+  filter(ID == sample_id) %>%
+  ggplot(aes(x = get(detect_time), y = Activity, color = Activity)) +
+  geom_point(alpha = 0.5) +
+  labs(title = paste("Timeline for Subject:", sample_id),
+       x = "Time (Seconds)", y = "Activity Name") +
+  theme_minimal()
+
+print(p_seq_viz)
+```
+```{r}
+# ==========================================
+# HIGH-PRECISION MULTI-ID TIMELINE (Rug Plot)
+# ==========================================
+library(tidyverse)
+
+# 1. Detect time column and select IDs
+detect_time <- ifelse("Time" %in% names(raw_data), "Time", names(raw_data)[1])
+
+# Selecting 3 representative IDs to avoid cluttering
+sample_ids <- unique(raw_data$ID)[1:3]
+
+# 2. Data Preparation
+multi_id_data <- raw_data %>%
+  filter(ID %in% sample_ids) %>%
+  mutate(Activity = trimws(as.character(Activity))) %>%
+  filter(!is.na(Activity))
+
+# 3. Generating the Faceted Rug Plot
+p_multi_timeline <- ggplot(multi_id_data, aes(x = get(detect_time), y = 1, fill = Activity)) +
+  # geom_tile creates solid blocks of color per second
+  geom_tile(width = 1.5) + 
+  # Separate horizontal bars for each Participant
+  facet_wrap(~ID, ncol = 1, scales = "free_x") +
+  # Professional color scheme
+  scale_fill_brewer(palette = "Set1", name = "Activity Type") +
+  scale_y_continuous(breaks = NULL) +
+  labs(title = "Experimental Activity Sequence (Sample IDs)",
+       subtitle = "Horizontal bars show chronological blocks. White gaps represent sensor transitions or missing labels.",
+       x = "Chronological Time Index (Seconds)", y = "Participant") +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(face = "bold", size = 10),
+    panel.grid = element_blank(),
+    legend.position = "bottom",
+    axis.title.y = element_blank()
+  )
+
+# ==========================================
+# OUTPUT
+# ==========================================
+print(p_multi_timeline)
+```
+```{r}
+# ==========================================
+# FINAL AVAILABILITY MATRIX (Binary 0/1)
+# ==========================================
+library(tidyverse)
+
+# 1. Identificar sensores reales
+sensors <- c("ECG", "Apple.Watch", "Empatica", "Garmin", "Fitbit", "Miband", "Biovotion")
+available_sensors <- names(raw_data)[names(raw_data) %in% sensors]
+
+# 2. Limpiar columna de actividades
+raw_data <- raw_data %>%
+  mutate(Activity = trimws(as.character(Activity))) %>%
+  filter(!is.na(Activity))
+
+# 3. Crear matriz de presencia de Actividades
+act_presence <- raw_data %>%
+  group_by(ID, Skin.Tone, Activity) %>%
+  summarise(Present = 1, .groups = "drop") %>%
+  pivot_wider(names_from = Activity, values_from = Present, values_fill = 0) %>%
+  rename_with(~paste0("Act_", .), -c(ID, Skin.Tone))
+
+# 4. Crear matriz de presencia de Sensores
+dev_presence <- raw_data %>%
+  group_by(ID, Skin.Tone) %>%
+  summarise(across(all_of(available_sensors), ~ as.numeric(any(!is.na(.)))), .groups = "drop") %>%
+  rename_with(~paste0("Dev_", .), -c(ID, Skin.Tone))
+
+# 5. Unir ambas y preparar para el gráfico
+final_matrix <- full_join(act_presence, dev_presence, by = c("ID", "Skin.Tone"))
+
+plot_data <- final_matrix %>%
+  pivot_longer(cols = starts_with(c("Act_", "Dev_")), 
+               names_to = "Feature", 
+               values_to = "Status") %>%
+  mutate(
+    Feature = str_replace_all(Feature, "Act_|Dev_", ""),
+    # ID formateado con el Tono de Piel para el eje Y
+    ID_Label = factor(paste0("ID: ", ID, " (ST: ", Skin.Tone, ")"))
+  )
+
+# 6. Gráfico Final: Azul (1) o Gris (0)
+p_final_binary <- ggplot(plot_data, aes(x = Feature, y = reorder(ID_Label, Skin.Tone), fill = as.factor(Status))) +
+  geom_tile(color = "white", linewidth = 0.1) +
+  scale_fill_manual(values = c("0" = "#f2f2f2", "1" = "#2c3e50"), 
+                    labels = c("Absent", "Present"), name = "Status") +
+  labs(title = "Subject Participation & Device Availability Matrix",
+       subtitle = "Rows sorted by Skin Tone (Fitzpatrick Scale). Dark blocks indicate data presence.",
+       x = "Activities and Sensors", y = "Participant") +
+  theme_minimal() +
+  theme(
+    axis.text.y = element_text(size = 4),
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    panel.grid = element_blank(),
+    legend.position = "bottom"
+  )
+
+# ==========================================
+# EXECUTION
+# ==========================================
+print(p_final_binary)
+
+# Resumen rápido para tu reporte
+cat("\n--- PARTICIPATION SUMMARY (Top 5 rows) ---\n")
+print(head(final_matrix, 5))
+```
+
+## MODELOO
+
+```{r}
+# ==========================================
+# MEASUREMENT AGREEMENT: ERROR CALCULATION
+# ==========================================
+
+# Calculamos el error absoluto para cada sensor respecto al ECG
+error_data <- raw_data %>%
+  filter(!is.na(ECG)) %>%
+  # Creamos columnas de error (Reloj - ECG)
+  mutate(across(all_of(setdiff(available_sensors, "ECG")), 
+                ~ abs(. - ECG), 
+                .names = "Err_{.col}")) %>%
+  # Seleccionamos solo lo importante
+  select(ID, Skin.Tone, Activity, starts_with("Err_"))
+
+# Resumen de MAE (Mean Absolute Error) por Tono de Piel
+mae_summary <- error_data %>%
+  group_by(Skin.Tone) %>%
+  summarise(across(starts_with("Err_"), ~ mean(., na.rm = TRUE)))
+
+print("--- MEAN ABSOLUTE ERROR (MAE) BY SKIN TONE ---")
+print(mae_summary)
+```
+
+```{r}
+save.image(file = "datoslimpios.RData")
+```
+
+

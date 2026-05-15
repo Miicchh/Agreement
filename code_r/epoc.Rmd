@@ -1,0 +1,706 @@
+---
+title: "processing"
+author: "AGREEMENT"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+### Read the dataset
+```{r}
+library(readxl)
+datos <- read_xlsx("pone.0168321.s003.xlsx")
+datos
+```
+
+### Set as factors several variables
+```{r}
+datos <- subset(datos, select = -Time)
+
+datos$Obs <- as.factor(datos$Obs)
+datos$PatientID <- as.factor(datos$PatientID)
+datos$Activity <- as.factor(datos$Activity)
+
+summary(datos)
+datos
+```
+
+Those observations with 0 are transformed to NA (it is not possible for a living person to have 0 rpm)
+```{r}
+datos[datos == 0 & sapply(datos, is.numeric)] <- NA
+summary(datos$PatientID)
+```
+
+
+```{r}
+table(datos$PatientID, datos$Activity)
+
+```
+
+
+```{r}
+sum(is.na(datos))
+tapply(rowSums(is.na(datos)), datos$PatientID, sum)
+```
+
+```{r}
+colSums(is.na(datos))
+
+datos[!complete.cases(datos), ]
+```
+
+
+```{r}
+round(colMeans(is.na(datos)) * 100, 3)
+
+```
+
+```{r}
+hist(datos$RRppg1)
+hist(datos$RRppg2)
+
+summary(datos$RRppg1)
+summary(datos$RRppg2)
+```
+
+
+With this it can be seen the large amount of missing data from the study.
+```{r}
+
+library(tidyverse)
+
+devices <- c("RRox","RRcm1","RRcm2","RRppg1","RRppg2","RRimp","RRacc","RRcb")
+colores <- c(
+  "RRox"   = "#1F78B4",
+  "RRcm1"  = "#E31A1C", 
+  "RRcm2"  = "#FF7F00", 
+  "RRppg1" = "#33A02C", 
+  "RRppg2" = "#6A3D9A",
+  "RRimp"  = "#B15928",
+  "RRacc"  = "#20B2AA",
+  "RRcb"   = "#FF69B4")
+
+datos_long <- datos %>%
+  pivot_longer(all_of(devices), names_to = "Device", values_to = "RR")
+
+datos_long %>%
+  dplyr::filter(Device != "RRox") %>%
+  group_by(Device) %>%
+  summarise(pct_na = mean(is.na(RR)) * 100) %>%
+  dplyr::filter(pct_na > 0) %>%
+  mutate(Device = fct_reorder(Device, pct_na)) %>%
+  ggplot(aes(x = Device, y = pct_na, fill = Device)) +
+  geom_col(alpha = 0.8) +
+  geom_text(aes(label = paste0(round(pct_na), "%")), hjust = -0.2, size = 3.5) +
+  scale_fill_manual(values = colores) +
+  coord_flip(ylim = c(0, 60)) +
+  labs(title = "% NA by device", x = NULL, y = "% NAs") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+```{r}
+library(dplyr)
+library(tidyr)
+
+datos %>%
+  group_by(Activity) %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(-Activity,
+               names_to = "Variable",
+               values_to = "Missing") %>%
+  dplyr::filter(Missing > 0)
+```
+
+```{r}
+unique(datos$Activity)
+
+```
+
+```{r}
+boxplot(datos[sapply(datos, is.numeric)],
+        las = 2,
+        col = "lightblue")
+```
+
+```{r}
+par(mfrow = c(3,3))
+
+for(i in names(datos)){
+  if(is.numeric(datos[[i]])){
+    hist(datos[[i]], main = i, col = "lightblue")
+  }
+}
+```
+
+```{r}
+library(ggplot2)
+
+# Boxplot RRox (gold standard) by activity
+ggplot(datos, aes(x = Activity, y = RRox)) +
+  geom_boxplot(fill = "steelblue", outlier.colour = "red") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "RRox by activity", y = "RR")
+```
+
+```{r}
+library(tidyverse)
+
+# devices avaliable
+devices <- c("RRox", "RRcm1", "RRcm2", "RRppg1", "RRppg2", "RRimp", "RRacc", "RRcb")
+
+# to detect outliers (1.5*IQR)
+detectar_outliers <- function(x) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  x < (Q1 - 1.5 * IQR) | x > (Q3 + 1.5 * IQR)
+}
+```
+
+
+
+```{r}
+outliers_tabla <- datos %>%
+  pivot_longer(cols = all_of(devices), 
+               names_to = "Device", 
+               values_to = "RR") %>%
+  group_by(Device) %>%
+  mutate(es_outlier = detectar_outliers(RR)) %>%
+  dplyr::filter(es_outlier == TRUE) %>%
+  dplyr::select(PatientID, Activity, Device, RR) %>%
+  arrange(Device, Activity)
+
+print(outliers_tabla)
+```
+
+```{r}
+resumen_outliers <- outliers_tabla %>%
+  group_by(Activity, Device) %>%
+  summarise(n_outliers = n(), .groups = "drop") %>%
+  pivot_wider(names_from = Device, values_from = n_outliers, values_fill = 0)
+
+print(resumen_outliers)
+```
+
+```{r}
+datos_long %>%
+  filter(!is.na(RR)) %>%
+  ggplot(aes(Device, RR, fill = Device)) +
+  geom_boxplot(alpha = 0.7) +
+  geom_hline(yintercept = 20, linetype = "dashed", color = "red") +
+  scale_fill_manual(values = colores) +
+  labs(title = "RR by device", y = "RR (resp/min)") +
+  theme_minimal()
+```
+
+
+The following scatter plots are done excluding the NAs, so it is not reliable.
+```{r}
+datos_long %>%
+  filter(Device != "RRox", !is.na(RR)) %>%
+  left_join(select(datos, PatientID, Obs, RRox), by = c("PatientID", "Obs")) %>%
+  filter(!is.na(RRox)) %>%
+  ggplot(aes(x = RRox, y = RR, color = Device)) +
+  geom_point(alpha = 0.3, size = 1) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "red") +
+  geom_smooth(method = "lm", se = FALSE) +
+  facet_wrap(~ Device, scales = "free", nrow = 2) +
+  scale_color_manual(values = colores) +
+  labs(title = "Devices vs. RRox (goldstandard)", x = "RRox (resp/min)", y = "Device (resp/min)") +
+  theme_minimal()
+```
+
+```{r}
+datos_long %>%
+  filter(!is.na(RR)) %>%
+  ggplot(aes(x = RR, fill = Device)) +
+  geom_histogram(bins = 20, alpha = 0.8, color = "white") +
+  geom_vline(xintercept = 20, linetype = "dashed", color = "red") +
+  facet_wrap(~ Device, nrow = 2) +
+  scale_fill_manual(values = colores) +
+  labs(title = "RR distribution by device", x = "RR (resp/min)", y = "Frequency") +
+  theme_minimal() + theme(legend.position = "none")
+```
+
+
+
+# BAYESIAN vs FREQUENTIST ANALYSIS: RR vs Gold Standard (RRox)
+```{r}
+cache = TRUE
+library(brms)
+library(tidyverse)
+library(posterior)
+library(DescTools)
+library(readxl)
+
+# Parameters
+DATA_PATH  <- "pone.0168321.s003.xlsx"
+DELTA <- 6      # ±6 rpm: clinically accepted range
+CP_TARGET <- 0.80   # Coverage Probability
+P_TARGET <- 0.70   # Bayesian threshold
+MAX_MISS <- 0.20   # exclude if >20% NAs in device × activity
+MIN_N <- 15     # min. valid n by analysis
+
+DEVICES <- c(
+  RRcm1 = "Camera-1", RRcm2 = "Camera-2",
+  RRppg1 = "PPG-1",   RRppg2 = "PPG-2",
+  RRimp = "Impedance", RRacc = "Accelerometer", RRcb = "Chest-band"
+)
+DEVICE_BY_ACTIVITY <- c(
+  RRcb = "Chest-band"   # only Chest-band for analysis by activity
+)
+
+priors <- c(
+  prior(normal(0, 15),      class = "Intercept"),
+  prior(student_t(3, 0, 5), class = "sd"),
+  prior(student_t(3, 0, 5), class = "sigma")
+)
+```
+
+
+## DATA
+
+```{r}
+raw <- read_excel(DATA_PATH)
+cat("Data:", nrow(raw), "observations |",
+    n_distinct(raw$PatientID), "patients |",
+    n_distinct(raw$Activity), "activities \n\n")
+
+# Exclude activities with >MAX_MISS NAs for a device
+filter_by_missing <- function(df, dev) {
+  df %>%
+    group_by(Activity) %>%
+    mutate(pct_miss = mean(is.na(.data[[dev]]))) %>%
+    ungroup() %>%
+    filter(pct_miss <= MAX_MISS) %>%
+    select(-pct_miss)
+}
+```
+
+## FREQUENTIST METRICS (PARKER)
+
+```{r}
+freq_metrics <- function(df, dev) {
+  d <- df %>%
+    transmute(gold = RRox, device = .data[[dev]], diff = device - gold) %>%
+    drop_na()
+
+  n <- nrow(d)
+  bias <- mean(d$diff)
+  s <- sd(d$diff)
+  se <- s / sqrt(n)
+
+  list(
+    n = n,
+    bias = bias,
+    bias_lo = bias - 1.96 * se,
+    bias_hi = bias + 1.96 * se,
+    loa_l = bias - 1.96 * s,
+    loa_u = bias + 1.96 * s,
+    cp = mean(abs(d$diff) <= DELTA),
+    tdi = as.numeric(quantile(abs(d$diff), 0.95)),
+    ccc = tryCatch(CCC(d$gold, d$device)$rho.c$est, error = function(e) NA_real_),
+    cia = tryCatch(1 - (s^2 + bias^2) / (2 * var(d$gold)), error = function(e) NA_real_)
+  )
+}
+```
+
+
+# BAYESIAN MODEL + METICS
+
+```{r}
+# 'by_activity': TRUE = just random effect of patient
+#                FALSE = random effects of patient + activity
+
+fit_bayes <- function(df, dev, by_activity = FALSE) {
+  d <- df %>%
+    transmute(
+      id       = factor(PatientID),
+      activity = factor(Activity),
+      diff     = .data[[dev]] - RRox
+    ) %>%
+    drop_na()
+
+  formula <- if (by_activity) {
+    diff ~ 1 + (1 | id)                    # in an activity: just patient
+  } else {
+    diff ~ 1 + (1 | id) + (1 | activity)  # global: patient + activity
+  }
+
+  fit <- brm(
+    formula,
+    data    = d,
+    family  = gaussian(),
+    prior   = priors,
+    chains  = 4, iter = 4000, warmup = 1000, seed = 42,
+    control = list(adapt_delta = 0.95),
+    silent  = 2, refresh = 0
+  )
+
+  draws <- as_draws_df(fit)
+
+  sigma_tot <- if (by_activity) {
+    sqrt(draws$sd_id__Intercept^2 + draws$sigma^2)
+  } else {
+    sqrt(draws$sd_id__Intercept^2 + draws$sd_activity__Intercept^2 + draws$sigma^2)
+  }
+
+  bias     <- draws$b_Intercept
+  cp_draws <- pnorm(DELTA, bias, sigma_tot) - pnorm(-DELTA, bias, sigma_tot)
+
+  out <- list(
+    fit = fit,
+    bias_mean  = mean(bias),
+    bias_lo = as.numeric(quantile(bias, 0.025)),
+    bias_hi = as.numeric(quantile(bias, 0.975)),
+    loa_l_mean = mean(bias - 1.96 * sigma_tot),
+    loa_l_lo = as.numeric(quantile(bias - 1.96 * sigma_tot, 0.025)),
+    loa_l_hi = as.numeric(quantile(bias - 1.96 * sigma_tot, 0.975)),
+    loa_u_mean = mean(bias + 1.96 * sigma_tot),
+    loa_u_lo = as.numeric(quantile(bias + 1.96 * sigma_tot, 0.025)),
+    loa_u_hi = as.numeric(quantile(bias + 1.96 * sigma_tot, 0.975)),
+    sigma_pat = mean(draws$sd_id__Intercept),
+    sigma_res = mean(draws$sigma),
+    sigma_tot = mean(sigma_tot),
+    cp_mean = mean(cp_draws),
+    cp_lo = as.numeric(quantile(cp_draws, 0.025)),
+    cp_hi = as.numeric(quantile(cp_draws, 0.975)),
+    p_cp_ok = mean(cp_draws >= CP_TARGET),
+    tdi_mean = mean(qnorm(0.95, abs(bias), sigma_tot)),
+    cp_draws = as.numeric(cp_draws)
+  )
+
+  # sigma of activity only in the global model
+  if (!by_activity) {
+    out$sigma_act <- mean(draws$sd_activity__Intercept)
+  }
+
+  out
+}
+```
+
+
+# TO PRINT RESULTS
+
+```{r}
+print_results <- function(f, b, label = "") {
+  cat(sprintf("\n [FREQUENTIST%s]\n", label))
+  cat(sprintf("  Bias: %.2f [%.2f, %.2f]  LoA: [%.2f, %.2f]\n",
+              f$bias, f$bias_lo, f$bias_hi, f$loa_l, f$loa_u))
+  cat(sprintf("  CP: %.1f%%   TDI: %.2f   CCC: %.3f   CIA: %.3f\n",
+              100 * f$cp, f$tdi, f$ccc, f$cia))
+
+  cat(sprintf("\n [BAYESIAN%s]\n", label))
+  cat(sprintf("  Bias: %.2f [%.2f, %.2f]  LoA: [%.2f, %.2f]\n",
+              b$bias_mean, b$bias_lo, b$bias_hi, b$loa_l_mean, b$loa_u_mean))
+  cat(sprintf("  LoA CrI: [%.2f-%.2f , %.2f-%.2f]\n",
+              b$loa_l_lo, b$loa_l_hi, b$loa_u_lo, b$loa_u_hi))
+  cat(sprintf("  CP: %.1f%% [%.1f%%, %.1f%%]   TDI: %.2f rpm\n",
+              100 * b$cp_mean, 100 * b$cp_lo, 100 * b$cp_hi, b$tdi_mean))
+
+  if (!is.null(b$sigma_act)) {
+    cat(sprintf("  sigma: patient=%.2f  activity=%.2f  residual=%.2f\n",
+                b$sigma_pat, b$sigma_act, b$sigma_res))
+  } else {
+    cat(sprintf("  sigma: patient=%.2f  residual=%.2f\n",
+                b$sigma_pat, b$sigma_res))
+  }
+
+  cat(sprintf("\n [JUST BAYES] P(CP >= %.0f%%) = %.1f%%  ->  %s\n",
+              100 * CP_TARGET, 100 * b$p_cp_ok,
+              ifelse(b$p_cp_ok >= P_TARGET, "RECOMMENDED", "NOT RECOMMENDED")))
+}
+```
+
+
+# GLOBAL ANALYSIS
+
+```{r}
+results_global <- list()
+
+for (dev in names(DEVICES)) {
+  dname  <- DEVICES[[dev]]
+  df_dev <- filter_by_missing(raw, dev)
+  n_kept <- sum(!is.na(df_dev[[dev]]) & !is.na(df_dev$RRox))
+  n_excl <- nrow(raw) - nrow(df_dev)
+
+  cat("═══════════════════════════════════════════════════\n")
+  cat(sprintf(" GLOBAL | %s\n", dname))
+  cat("═══════════════════════════════════════════════════\n")
+  cat(sprintf(" Valid pairs: %d  |  Excluded by >20%% NAs: %d\n", n_kept, n_excl))
+
+  if (n_kept < MIN_N) { cat(" Not enough data. Not included\n\n"); next }
+
+  f <- freq_metrics(df_dev, dev)
+  b <- fit_bayes(df_dev, dev, by_activity = FALSE)
+
+  act_cp <- df_dev %>%
+    transmute(activity = Activity, diff = .data[[dev]] - RRox) %>%
+    drop_na() %>%
+    group_by(activity) %>%
+    summarise(n = n(), cp = mean(abs(diff) <= DELTA), .groups = "drop") %>%
+    arrange(desc(cp))
+
+  results_global[[dev]] <- list(dname = dname, freq = f, bayes = b,
+                                 activity = act_cp, df_dev = df_dev)
+
+  print_results(f, b)
+
+  cat("\n [CP frequentist by activity]:\n")
+  act_cp %>%
+    mutate(label = sprintf("  %-14s n=%3d  CP=%.1f%%\n", activity, n, 100*cp)) %>%
+    pull(label) %>% cat()
+
+  cat("\n")
+}
+
+```
+
+
+
+# ANALYSIS BY ACTIVITY (just chest-band)
+
+```{r}
+results_act <- list()
+activities  <- sort(unique(raw$Activity))
+
+for (dev in names(DEVICE_BY_ACTIVITY)) {
+  dname <- DEVICE_BY_ACTIVITY[[dev]]
+
+  cat("═══════════════════════════════════════════════════\n")
+  cat(sprintf(" BY ACTIVITY | %s\n", dname))
+  cat("═══════════════════════════════════════════════════\n")
+
+  for (act in activities) {
+    df_sub <- raw %>%
+      filter(Activity == act) %>%
+      mutate(pct_miss = mean(is.na(.data[[dev]]) | is.na(RRox))) %>%
+      filter(pct_miss <= MAX_MISS) %>%
+      select(-pct_miss)
+
+    n_valid   <- sum(!is.na(df_sub[[dev]]) & !is.na(df_sub$RRox))
+    pct_miss  <- mean(is.na(raw[[dev]][raw$Activity == act]) |
+                      is.na(raw$RRox[raw$Activity == act]))
+
+    cat(sprintf(" %-18s | n=%d | NA=%.1f%%", act, n_valid, 100 * pct_miss))
+
+    if (pct_miss > MAX_MISS) { cat("  -> Excluded (>20% NAs)\n"); next }
+    if (n_valid  < MIN_N)    { cat("  -> Not enough data \n"); next }
+    cat("  -> Analized\n")
+
+    f <- freq_metrics(df_sub, dev)
+    b <- fit_bayes(df_sub, dev, by_activity = TRUE)
+
+    key <- paste(dev, act, sep = "__")
+    results_act[[key]] <- list(dname = dname, activity = act,
+                                dev = dev,
+                                freq = f, bayes = b,
+                                df_sub = df_sub)
+
+    print_results(f, b, label = paste0(" | ", act))
+    cat("\n")
+  }
+}
+```
+
+
+
+# SUMMARY TABLES
+
+```{r}
+cat("═══════════════════════════════════════════════════\n")
+cat(" GOBAL SUMMARY - DEVICES \n")
+cat("═══════════════════════════════════════════════════\n\n")
+
+map_dfr(names(results_global), function(dev) {
+  f <- results_global[[dev]]$freq
+  b <- results_global[[dev]]$bayes
+  tibble(
+    Dispositivo = results_global[[dev]]$dname,
+    n = f$n,
+    Bias = round(b$bias_mean, 2),
+    LoA = sprintf("[%.1f, %.1f]", b$loa_l_mean, b$loa_u_mean),
+    CP_freq = sprintf("%.1f%%", 100 * f$cp),
+    CP_bayes = sprintf("%.1f%% [%.1f%%, %.1f%%]",
+                          100*b$cp_mean, 100*b$cp_lo, 100*b$cp_hi),
+    `P(CP>=80%)` = sprintf("%.1f%%", 100 * b$p_cp_ok),
+    TDI = round(b$tdi_mean, 2),
+    CCC = round(f$ccc, 3),
+    CIA = round(f$cia, 3),
+    Veredicto = ifelse(b$p_cp_ok >= P_TARGET, "RECOMMENDED", "No")
+  )
+}) %>% print(n = Inf, width = Inf)
+
+cat("\n═══════════════════════════════════════════════════\n")
+cat(" SUMMARY BY ACTIVITY - Chest-band\n")
+cat("═══════════════════════════════════════════════════\n\n")
+
+map_dfr(names(results_act), function(k) {
+  f <- results_act[[k]]$freq
+  b <- results_act[[k]]$bayes
+  tibble(
+    Actividad = results_act[[k]]$activity,
+    n = f$n,
+    Bias = round(b$bias_mean, 2),
+    LoA = sprintf("[%.1f, %.1f]", b$loa_l_mean, b$loa_u_mean),
+    CP_freq = sprintf("%.1f%%", 100 * f$cp),
+    CP_bayes = sprintf("%.1f%% [%.1f%%, %.1f%%]",
+                           100*b$cp_mean, 100*b$cp_lo, 100*b$cp_hi),
+    `P(CP>=80%)` = sprintf("%.1f%%", 100 * b$p_cp_ok),
+    TDI = round(b$tdi_mean, 2),
+    CCC = round(f$ccc, 3),
+    CIA = round(f$cia, 3),
+    Veredicto = ifelse(b$p_cp_ok >= P_TARGET, "RECOMMENDED", "No")
+  )
+}) %>%
+  arrange(desc(readr::parse_number(`P(CP>=80%)`))) %>%
+  print(n = Inf, width = Inf)
+
+```
+
+
+## GRAPHS
+
+```{r}
+
+# Bland-Altman global by device
+for (dev in names(results_global)) {
+  r   <- results_global[[dev]]
+  b   <- r$bayes
+  obs <- r$df_dev %>%
+    transmute(avg = (.data[[dev]] + RRox) / 2,
+              diff = .data[[dev]] - RRox,
+              activity = Activity) %>% drop_na()
+
+  print(
+    ggplot(obs, aes(avg, diff, colour = activity)) +
+      geom_point(alpha = 0.7, size = 1.8) +
+      geom_hline(yintercept = b$bias_mean, linewidth = 0.9) +
+      geom_hline(yintercept = c(b$loa_l_mean, b$loa_u_mean),
+                 linetype = "dashed", linewidth = 0.8) +
+      geom_hline(yintercept = c(-DELTA, DELTA),
+                 linetype = "dotted", colour = "red", linewidth = 0.6) +
+      labs(title    = paste("Bayesian Bland-Altman (global):", r$dname),
+           subtitle = sprintf("Bias=%.2f [%.2f,%.2f]  LoA=[%.2f,%.2f]  CP=%.1f%%",
+                              b$bias_mean, b$bias_lo, b$bias_hi,
+                              b$loa_l_mean, b$loa_u_mean, 100*b$cp_mean),
+           x = "(Device + Gold)/2 (rpm)", y = "Device - Gold (rpm)",
+           colour = "Activity") +
+      theme_bw(base_size = 11)
+  )
+}
+
+# Bland-Altman by activity (Chest-band)
+for (k in names(results_act)) {
+  r   <- results_act[[k]]
+  b   <- r$bayes
+  obs <- r$df_sub %>%
+    transmute(avg  = (.data[[r$dev]] + RRox) / 2,
+              diff = .data[[r$dev]] - RRox) %>% drop_na()
+
+  print(
+    ggplot(obs, aes(avg, diff)) +
+      geom_point(alpha = 0.7, size = 1.8, colour = "#2c7bb6") +
+      geom_hline(yintercept = b$bias_mean, linewidth = 0.9) +
+      geom_hline(yintercept = c(b$loa_l_mean, b$loa_u_mean),
+                 linetype = "dashed", linewidth = 0.8) +
+      geom_hline(yintercept = c(-DELTA, DELTA),
+                 linetype = "dotted", colour = "red", linewidth = 0.6) +
+      labs(title    = paste("Bayesian Bland-Altman:", r$dname, "|", r$activity),
+           subtitle = sprintf("Bias=%.2f [%.2f,%.2f]  LoA=[%.2f,%.2f]  CP=%.1f%%",
+                              b$bias_mean, b$bias_lo, b$bias_hi,
+                              b$loa_l_mean, b$loa_u_mean, 100*b$cp_mean),
+           x = "(Device + Gold)/2 (rpm)", y = "Device - Gold (rpm)") +
+      theme_bw(base_size = 11)
+  )
+}
+
+# Heatmap global CP
+map_dfr(names(results_global), function(dev) {
+  results_global[[dev]]$activity %>%
+    mutate(Device = results_global[[dev]]$dname)
+}) %>%
+  ggplot(aes(Device, activity, fill = cp)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.0f%%", 100*cp)), size = 3) +
+  scale_fill_gradient2(low = "#d73027", mid = "#ffffbf", high = "#1a9850",
+                       midpoint = CP_TARGET, limits = c(0,1), name = "CP") +
+  labs(title = "Coverage Probability by device and activity",
+       subtitle = paste0("Criterion: ±", DELTA, " rpm  |  Activities with >20% NAs excluded"),
+       x = NULL, y = NULL) +
+  theme_bw(base_size = 11) +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+
+# Heatmap P(CP>=80%) by activity (Chest-band)
+map_dfr(names(results_act), function(k) {
+  b <- results_act[[k]]$bayes
+  tibble(Activity  = results_act[[k]]$activity,
+         Device = results_act[[k]]$dname,
+         p_ok = b$p_cp_ok)
+}) %>%
+  ggplot(aes(Device, Activity, fill = p_ok)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.0f%%", 100*p_ok)), size = 3) +
+  scale_fill_gradient2(low = "#d73027", mid = "#fee08b", high = "#1a9850",
+                       midpoint = P_TARGET, limits = c(0,1), name = "P(recom.)") +
+  labs(title = "Bayesian recommendation probability — Chest-band by activity",
+       subtitle = sprintf("Recommendable if P(CP >= %.0f%%) >= %.0f%%",
+                          100*CP_TARGET, 100*P_TARGET),
+       x = NULL, y = NULL) +
+  theme_bw(base_size = 11)
+```
+
+```{r}
+raw %>%
+  pivot_longer(cols = c(RRcm2, RRppg2, RRimp, RRacc, RRcb),
+               names_to = "Device", values_to = "RR") %>%
+  drop_na(RR) %>%
+  ggplot(aes(x = RR)) +
+  geom_histogram(bins = 20, fill = "#2c7bb6", colour = "white") +
+  facet_wrap(~Device, scales = "free") +
+  labs(title = "Distribution of RR readings by device",
+       x = "Respiratory Rate (rpm)", y = "Count") +
+  theme_bw(base_size = 11)
+```
+
+```{r}
+# Boxplot of each device by activity
+raw %>%
+  pivot_longer(cols = c(RRcm2, RRppg2, RRimp, RRacc, RRcb),
+               names_to = "Device", values_to = "RR") %>%
+  ggplot(aes(Activity, RR, fill = Device)) +
+  geom_boxplot(outlier.size = 0.8) +
+  facet_wrap(~Device, scales = "free") +
+  theme_bw(base_size = 10) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Distribution of RR by device and activity",
+       x = NULL, y = "RR (rpm)")
+
+# Heatmap of NAs by device × activity
+raw %>%
+  pivot_longer(cols = c(RRcm2, RRppg2, RRimp, RRacc, RRcb),
+               names_to = "Device", values_to = "val") %>%
+  group_by(Device, Activity) %>%
+  summarise(pct_na = mean(is.na(val)) * 100, .groups = "drop") %>%
+  ggplot(aes(Device, Activity, fill = pct_na)) +
+  geom_tile(colour = "white") +
+  geom_text(aes(label = sprintf("%.0f%%", pct_na)), size = 3) +
+  scale_fill_gradient(low = "white", high = "#d73027", name = "% NA") +
+  labs(title = "Missing data (%) by device and activity",
+       x = NULL, y = NULL) +
+  theme_bw(base_size = 11)
+
+# Table of the valid n by device
+raw %>%
+  summarise(across(c(RRcm2, RRppg2, RRimp, RRacc, RRcb),
+                   list(n = ~sum(!is.na(.)),
+                        pct_na = ~round(mean(is.na(.))*100, 1)))) %>%
+  pivot_longer(everything()) %>%
+  print()
+```
+

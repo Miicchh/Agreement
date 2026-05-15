@@ -1,0 +1,302 @@
+---
+title: "brms"
+author: "Marta"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r cars}
+df <- read.csv("smartwatch_minable_view.csv")
+
+minable_view <- df %>%filter(!is.na(HR_GoldStandard)) %>%filter(HR_GoldStandard >= 30 & HR_GoldStandard <= 200)
+print(paste("Máximo BPM en ECG tras filtrar:", max(minable_view$HR_GoldStandard)))
+```
+
+
+# INLA
+
+```{r}
+library(INLA)
+library(dplyr)
+
+df <- read.csv("smartwatch_minable_view.csv")
+
+CAD_val <- 5  # Clinical Allowed Difference (BPM)
+
+# ─────────────────────────────────────────────
+# FUNCIÓN PRINCIPAL: modelo INLA sobre diff
+# ─────────────────────────────────────────────
+fit_inla_diff <- function(df_sub) {
+  df_sub <- df_sub %>%
+    mutate(
+      diff   = as.numeric(HR_Device) - as.numeric(HR_GoldStandard),
+      ID_idx = as.numeric(as.factor(ID))
+    ) %>%
+    filter(!is.na(diff))
+  
+  if (nrow(df_sub) < 30) return(NULL)
+  
+  fit <- inla(diff ~ 1 + f(ID_idx, model = "iid"),
+              data = df_sub,
+              family = "gaussian",
+              control.compute = list(config = TRUE, dic = TRUE, waic = TRUE),
+              control.predictor = list(compute = TRUE))
+  
+  # Parámetros del posterior
+  alpha     <- fit$summary.fixed["(Intercept)", "mean"]
+  alpha_lo  <- fit$summary.fixed["(Intercept)", "0.025quant"]
+  alpha_hi  <- fit$summary.fixed["(Intercept)", "0.975quant"]
+  
+  prec_e    <- fit$summary.hyperpar["Precision for the Gaussian observations", "mean"]
+  prec_id   <- fit$summary.hyperpar["Precision for ID_idx", "mean"]
+  
+  sigma_e   <- 1 / sqrt(prec_e)
+  sigma_id  <- 1 / sqrt(prec_id)
+  sigma_tot <- sqrt(sigma_e^2 + sigma_id^2)
+  
+  # Muestras del posterior para TDI y CP (esto es lo bayesiano de verdad)
+  n_sim      <- 20000
+  alpha_sim  <- rnorm(n_sim, alpha, sigma_tot)
+  
+  # CCC real: 2*cov(x,y) / (var(x) + var(y) + (mean(x)-mean(y))^2)
+  x <- as.numeric(df_sub$HR_GoldStandard)
+  y <- as.numeric(df_sub$HR_Device)
+  ccc_val <- (2 * cov(x, y)) / (var(x) + var(y) + (mean(x) - mean(y))^2)
+  
+  data.frame(
+    alpha         = round(alpha, 3),        # Sesgo medio (BPM)
+    alpha_CI_low  = round(alpha_lo, 3),     # IC 95% inferior
+    alpha_CI_high = round(alpha_hi, 3),     # IC 95% superior
+    sigma_patient = round(sigma_id, 3),     # SD variabilidad entre sujetos
+    sigma_residual= round(sigma_e, 3),      # SD error residual
+    LoA_Inf       = round(alpha - 1.96 * sigma_tot, 3),
+    LoA_Sup       = round(alpha + 1.96 * sigma_tot, 3),
+    TDI_95        = round(quantile(abs(alpha_sim), 0.95), 3),
+    CP            = round(mean(abs(alpha_sim) <= CAD_val), 4),
+    CIA           = round(sigma_id^2 / (sigma_id^2 + sigma_e^2), 4),
+    CCC           = round(ccc_val, 4),
+    DIC           = round(fit$dic$dic, 2),
+    WAIC          = round(fit$waic$waic, 2)
+  )
+}
+
+# ─────────────────────────────────────────────
+# 1. TABLA GLOBAL (un modelo por dispositivo)
+# ─────────────────────────────────────────────
+dispositivos <- unique(df$Device)
+
+tabla_global <- do.call(rbind, lapply(dispositivos, function(dev) {
+  df_sub <- df %>% filter(Device == dev,
+                          !is.na(HR_GoldStandard),
+                          !is.na(HR_Device),
+                          HR_GoldStandard >= 30,
+                          HR_GoldStandard <= 200)
+  res <- fit_inla_diff(df_sub)
+  if (!is.null(res)) cbind(Device = dev, res)
+}))
+
+cat("\n===== TABLA GLOBAL =====\n")
+print(tabla_global)
+
+# ─────────────────────────────────────────────
+# 2. TABLA POR ACTIVIDAD
+# ─────────────────────────────────────────────
+actividades <- unique(df$Activity)
+
+tabla_activity <- do.call(rbind, lapply(dispositivos, function(dev) {
+  do.call(rbind, lapply(actividades, function(act) {
+    df_sub <- df %>% filter(Device == dev, Activity == act,
+                            !is.na(HR_GoldStandard),
+                            !is.na(HR_Device),
+                            HR_GoldStandard >= 30,
+                            HR_GoldStandard <= 200)
+    res <- fit_inla_diff(df_sub)
+    if (!is.null(res)) cbind(Device = dev, Activity = act, res)
+  }))
+}))
+
+cat("\n===== TABLA POR ACTIVIDAD =====\n")
+print(tabla_activity)
+
+# ─────────────────────────────────────────────
+# 3. TABLA POR SKIN TONE
+# ─────────────────────────────────────────────
+skin_tones <- unique(df$Skin.Tone)
+
+tabla_skin <- do.call(rbind, lapply(dispositivos, function(dev) {
+  do.call(rbind, lapply(skin_tones, function(st) {
+    df_sub <- df %>% filter(Device == dev, Skin.Tone == st,
+                            !is.na(HR_GoldStandard),
+                            !is.na(HR_Device),
+                            HR_GoldStandard >= 30,
+                            HR_GoldStandard <= 200)
+    res <- fit_inla_diff(df_sub)
+    if (!is.null(res)) cbind(Device = dev, Skin.Tone = st, res)
+  }))
+}))
+
+cat("\n===== TABLA POR SKIN TONE =====\n")
+print(tabla_skin)
+```
+
+# BRMS
+
+```{r}
+library(brms)
+
+get_metrics_brms_long <- function(reloj_name, data) {
+  
+  df_sub <- data %>%
+    filter(Device == reloj_name) %>%
+    rename(y = HR_Device, x = HR_GoldStandard) %>%
+    filter(!is.na(y), !is.na(x))
+  
+  if(nrow(df_sub) < 10) return(NULL)
+  
+  fit <- brm(
+    formula = y ~ 1 + x + (1|ID),
+    data = df_sub,
+    family = gaussian(),
+    chains = 4,
+    iter = 4000,
+    warmup = 2000,
+    cores = 4,
+    control = list(adapt_delta = 0.95, max_treedepth = 12),
+    backend = "rstan",
+    silent = 0
+  )
+  
+  draws <- as.data.frame(fit)
+  CAD_val <- 5
+  
+  return(data.frame(
+    Reloj = reloj_name,
+    CCC = mean((2 * draws$b_x) / (draws$b_x^2 + 1 + (draws$b_Intercept^2 / draws$sigma^2))),
+    LoA_Inf = mean(draws$b_Intercept - 1.96 * draws$sigma),
+    LoA_Sup = mean(draws$b_Intercept + 1.96 * draws$sigma),
+    TDI_95 = as.numeric(quantile(abs(rnorm(nrow(draws), draws$b_Intercept, draws$sigma)), 0.95)),
+    CP = mean(abs(rnorm(nrow(draws), draws$b_Intercept, draws$sigma)) <= CAD_val),
+    CIA = mean(draws$sd_ID__Intercept^2 / (draws$sd_ID__Intercept^2 + draws$sigma^2))
+  ))
+}
+
+dispositivos <- unique(df$Device)
+tabla_brms <- do.call(rbind, lapply(dispositivos, get_metrics_brms_long, data = df))
+
+print("--- TABLA COMPARATIVA BRMS (DATASET COMPLETO) ---")
+print(tabla_brms)
+```
+
+
+
+
+
+
+
+
+
+#SKIN INLA
+```{r}
+library(INLA)
+library(dplyr)
+library(ggplot2)
+
+CAD_val <- 5 
+
+# 1. FUNCIÓN MAESTRA TRIPLE (CP Empírico, CP Bayesiano y CCC)
+get_all_metrics <- function(reloj_name, tono, data) {
+  
+  df_sub <- data %>%
+    filter(Device == reloj_name, Skin.Tone == tono,
+           !is.na(HR_GoldStandard), !is.na(HR_Device),
+           as.numeric(HR_GoldStandard) >= 30, as.numeric(HR_GoldStandard) <= 200) %>%
+    mutate(
+      diff = as.numeric(HR_Device) - as.numeric(HR_GoldStandard),
+      ID_idx = as.numeric(as.factor(ID)) 
+    ) %>%
+    filter(!is.na(diff))
+  
+  if(nrow(df_sub) < 30) return(NULL) 
+  
+  # --- MÉTODO 1: CP EMPÍRICO ---
+  cp_empirical <- round(mean(abs(df_sub$diff) <= CAD_val), 4)
+  
+  # --- MÉTODO 2: CCC (Concordancia Real) ---
+  x <- as.numeric(df_sub$HR_GoldStandard)
+  y <- as.numeric(df_sub$HR_Device)
+  ccc_val <- (2 * cov(x, y)) / (var(x) + var(y) + (mean(x) - mean(y))^2)
+  
+  # --- MÉTODO 3: CP BAYESIANO (Modelo Jerárquico INLA) ---
+  if(length(unique(df_sub$ID_idx)) > 1) {
+    fit <- inla(diff ~ 1 + f(ID_idx, model = "iid"), data = df_sub, family = "gaussian")
+    alpha <- fit$summary.fixed["(Intercept)", "mean"]
+    prec_e <- fit$summary.hyperpar["Precision for the Gaussian observations", "mean"]
+    prec_id <- fit$summary.hyperpar["Precision for ID_idx", "mean"]
+    sigma_tot <- sqrt((1/prec_e) + (1/prec_id))
+  } else {
+    fit <- inla(diff ~ 1, data = df_sub, family = "gaussian")
+    alpha <- fit$summary.fixed["(Intercept)", "mean"]
+    prec_e <- fit$summary.hyperpar["Precision for the Gaussian observations", "mean"]
+    sigma_tot <- 1 / sqrt(prec_e)
+  }
+  
+  set.seed(123) 
+  alpha_sim <- rnorm(20000, alpha, sigma_tot)
+  cp_bayesian <- round(mean(abs(alpha_sim) <= CAD_val), 4)
+  
+  return(data.frame(
+    Device = reloj_name, Skin_Tone = as.character(tono), 
+    CP_Empirical = cp_empirical, CP_Bayesian = cp_bayesian, CCC = ccc_val
+  ))
+}
+
+# 2. EJECUCIÓN
+tonos_unicos <- unique(df$Skin.Tone)
+relojes_unicos <- unique(df$Device)
+
+resultados_lista <- list()
+for(r in relojes_unicos) {
+  for(t in tonos_unicos) {
+    resultados_lista[[paste(r, t)]] <- get_all_metrics(r, t, df)
+  }
+}
+
+res_skin <- bind_rows(resultados_lista)
+res_skin$Skin_Tone <- factor(res_skin$Skin_Tone, levels = c("1", "2", "3", "4", "5", "6"))
+
+# 3. GENERACIÓN DE LOS TRES GRÁFICOS
+
+# Gráfico A: CP Empírico
+p1 <- ggplot(res_skin, aes(x = Skin_Tone, y = CP_Empirical, fill = Device)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black", alpha = 0.8) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", color = "red") + 
+  labs(title = "CP (Empirical) by Skin Tone", y = "CP Score") +
+  theme_minimal() + scale_y_continuous(limits = c(0, 1)) + scale_fill_brewer(palette = "Paired")
+
+# Gráfico B: CP Bayesiano
+p2 <- ggplot(res_skin, aes(x = Skin_Tone, y = CP_Bayesian, fill = Device)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black", alpha = 0.8) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", color = "red") + 
+  labs(title = "CP (Bayesian) by Skin Tone", y = "CP Score") +
+  theme_minimal() + scale_y_continuous(limits = c(0, 1)) + scale_fill_brewer(palette = "Paired")
+
+# Gráfico C: CCC (Concordancia)
+p3 <- ggplot(res_skin, aes(x = Skin_Tone, y = CCC, fill = Device)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black", alpha = 0.8) +
+  geom_hline(yintercept = 0.8, linetype = "dashed", color = "red") + 
+  labs(title = "CCC Score by Skin Tone", y = "CCC Score") +
+  theme_minimal() + scale_y_continuous(limits = c(0, 1)) + scale_fill_brewer(palette = "Paired")
+
+# Mostrar los tres
+print(p1)
+Sys.sleep(1)
+print(p2)
+Sys.sleep(1)
+print(p3)
+```
+
